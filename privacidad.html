@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#07060d">
+<title>Política de privacidad · Choque Estelar</title>
+<link rel="icon" href="./favicon.ico" sizes="any">
+<style>
+  :root { --bg: #07060d; --panel: #13111f; --text: #ecebf7; --muted: #b8b4d6; --accent: #b9b2ff; --line: #2a2640; }
+  html { background: var(--bg); }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 780px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 28px; margin: 0 0 4px; color: var(--accent); }
+  h2 { font-size: 20px; margin: 32px 0 8px; border-top: 1px solid var(--line); padding-top: 24px; }
+  h3 { font-size: 17px; margin: 22px 0 6px; }
+  p, li { color: var(--text); }
+  .muted { color: var(--muted); font-size: 14px; }
+  nav { display: flex; gap: 12px; margin: 16px 0 8px; flex-wrap: wrap; }
+  nav a, a { color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 15px; }
+  th, td { text-align: left; vertical-align: top; padding: 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; }
+  .box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; }
+  code { background: var(--panel); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Choque Estelar</h1>
+<p class="muted">Política de privacidad · Privacy policy — Última actualización / Last updated: 13-11-2026</p>
+<nav><a href="#es">Español</a><a href="#en">English</a><a href="./">Volver al juego / Back to the game</a></nav>
+
+<section id="es" lang="es">
+<h2>Política de privacidad (español)</h2>
+
+<div class="box">
+<p><strong>Resumen:</strong> Choque Estelar no tiene cuentas, ni anuncios, ni compras, ni analíticas. El responsable del juego no tiene servidores propios y <strong>no recoge, no guarda y no vende datos personales</strong>. Tu progreso se guarda solo en tu dispositivo. Si juegas online, tu dispositivo se conecta directamente con los de los otros jugadores.</p>
+</div>
+
+<h3>1. Quién es el responsable</h3>
+<p>Responsable: <strong>[NOMBRE DEL RESPONSABLE]</strong>. Contacto: <strong>[CORREO DE CONTACTO]</strong>.</p>
+
+<h3>2. Qué se guarda en tu dispositivo</h3>
+<p>El juego usa el almacenamiento local del navegador o de la app (<code>localStorage</code>) para guardar, <strong>solo en tu dispositivo</strong>:</p>
+<ul>
+  <li>Tu progreso: experiencia, nivel del Pase Estelar, misiones, objetos cosméticos desbloqueados y equipados, estadísticas de partidas.</li>
+  <li>Tu puntuación de la Clasificatoria.</li>
+  <li>Ajustes: volumen, controles y opciones de entrenamiento, reglas del Modo Fiesta, recordatorio de descanso y opciones de nombres.</li>
+  <li>El apodo que escribas para las salas privadas (si escribes uno).</li>
+</ul>
+<p>Nada de esto se envía al responsable. Puedes borrarlo en cualquier momento borrando los datos del sitio o de la app, o desinstalándola.</p>
+
+<h3>3. Juego online (opcional)</h3>
+<p>El juego online funciona <strong>de dispositivo a dispositivo</strong> (WebRTC) mediante la biblioteca libre PeerJS, sin servidores del responsable:</p>
+<ul>
+  <li>Para encontrar a los demás jugadores, tu dispositivo se conecta a un <strong>servidor público de señalización de PeerJS</strong> y, si hace falta, a servidores públicos STUN/TURN (por ejemplo, los que PeerJS usa por defecto). Estos servicios, gestionados por terceros, ven tu <strong>dirección IP</strong> y un identificador temporal aleatorio de la sesión (o el código de la sala), igual que cualquier servicio de internet.</li>
+  <li>Los otros jugadores de la partida reciben, mientras dura la conexión: un identificador aleatorio temporal, el luchador, color y cosméticos que elijas, si estás listo, tu puntuación de clasificatoria (para emparejar), el estado de la partida (posiciones, golpes) y las <strong>frases y gestos predefinidos</strong> que envíes. En las <strong>salas privadas</strong> también ven el apodo que hayas escrito; en la <strong>Clasificatoria</strong> nunca se envía: todos ven un nombre generado automáticamente.</li>
+  <li><strong>No hay chat libre</strong>: solo frases predefinidas. Puedes silenciar a otros jugadores.</li>
+  <li>Como en toda conexión directa, los otros jugadores pueden llegar a ver tu dirección IP a nivel técnico. Los datos de la partida viajan cifrados (DTLS de WebRTC) entre los dispositivos.</li>
+  <li>El responsable no recibe ni guarda nada de esto. Al terminar la partida, la conexión se cierra.</li>
+</ul>
+<p><strong>No uses tu nombre real ni datos personales como apodo.</strong></p>
+
+<h3>4. Servicios de terceros que carga el juego</h3>
+<ul>
+  <li><strong>jsDelivr</strong> (cdn.jsdelivr.net): descarga las bibliotecas three.js y PeerJS.</li>
+  <li><strong>Google Fonts</strong> (fonts.googleapis.com, fonts.gstatic.com): descarga los tipos de letra.</li>
+  <li><strong>El servicio de alojamiento de esta web</strong> (por ejemplo, GitHub Pages) sirve los archivos del juego.</li>
+</ul>
+<p>Estos servicios reciben tu dirección IP y datos técnicos normales de cualquier petición web (navegador, sistema), según sus propias políticas de privacidad. Tras la primera visita, el juego guarda estas bibliotecas en tu dispositivo para poder jugar sin conexión.</p>
+<p>Si instalas el juego desde Google Play o Microsoft Store, la tienda y el navegador del sistema (por ejemplo, Chrome o Edge) tratan datos según sus propias políticas; el juego no les envía datos adicionales.</p>
+
+<h3>5. Lo que el juego NO hace</h3>
+<ul>
+  <li>No pide cuentas, correo, teléfono, ubicación, contactos, cámara ni micrófono.</li>
+  <li>No muestra anuncios ni usa identificadores publicitarios.</li>
+  <li>No tiene compras ni dinero real. El Pase Estelar es gratuito.</li>
+  <li>No usa analíticas, cookies de seguimiento ni perfiles.</li>
+</ul>
+
+<h3>6. Menores</h3>
+<p>El juego no pide ni recoge datos personales de nadie, tampoco de menores. Recomendamos que los menores jueguen online con la supervisión de su familia y sin poner datos personales en el apodo.</p>
+
+<h3>7. Tus derechos</h3>
+<p>Como el responsable no guarda datos tuyos, no hay datos que consultar, corregir o borrar en sus sistemas. Tus datos locales los controlas tú (punto 2). Para cualquier duda, escribe a <strong>[CORREO DE CONTACTO]</strong>.</p>
+
+<h3>8. Cambios</h3>
+<p>Si esta política cambia, se publicará aquí con una nueva fecha de actualización.</p>
+</section>
+
+<section id="en" lang="en">
+<h2>Privacy policy (English)</h2>
+
+<div class="box">
+<p><strong>Summary:</strong> Choque Estelar has no accounts, no ads, no purchases and no analytics. The game's owner runs no servers and <strong>does not collect, store or sell personal data</strong>. Your progress is saved only on your device. When you play online, your device connects directly to the other players' devices.</p>
+</div>
+
+<h3>1. Who is responsible</h3>
+<p>Owner: <strong>[NOMBRE DEL RESPONSABLE]</strong>. Contact: <strong>[CORREO DE CONTACTO]</strong>.</p>
+
+<h3>2. What is stored on your device</h3>
+<p>The game uses the browser's or app's local storage (<code>localStorage</code>) to keep, <strong>only on your device</strong>:</p>
+<ul>
+  <li>Your progress: experience, Star Pass level, missions, unlocked and equipped cosmetics, match statistics.</li>
+  <li>Your Ranked score.</li>
+  <li>Settings: volume, controls and training options, Party Mode rules, break reminder and name options.</li>
+  <li>The nickname you type for private rooms (if you type one).</li>
+</ul>
+<p>None of this is sent to the owner. You can delete it at any time by clearing the site's or app's data, or by uninstalling the app.</p>
+
+<h3>3. Online play (optional)</h3>
+<p>Online play works <strong>device to device</strong> (WebRTC) through the open-source PeerJS library, with no servers run by the owner:</p>
+<ul>
+  <li>To find other players, your device connects to a <strong>public PeerJS signaling server</strong> and, when needed, to public STUN/TURN servers (for example, PeerJS's defaults). These third-party services see your <strong>IP address</strong> and a random temporary session identifier (or the room code), like any internet service.</li>
+  <li>Other players in the match receive, while connected: a random temporary identifier, the fighter, color and cosmetics you choose, your ready status, your Ranked score (for matchmaking), the match state (positions, hits) and the <strong>predefined phrases and emotes</strong> you send. In <strong>private rooms</strong> they also see the nickname you typed; in <strong>Ranked</strong> it is never sent: everyone sees an automatically generated name.</li>
+  <li><strong>There is no free-text chat</strong>: only predefined phrases. You can mute other players.</li>
+  <li>As with any direct connection, other players may technically be able to see your IP address. Match data travels encrypted (WebRTC DTLS) between devices.</li>
+  <li>The owner receives and stores none of this. The connection closes when the match ends.</li>
+</ul>
+<p><strong>Do not use your real name or personal details as a nickname.</strong></p>
+
+<h3>4. Third-party services loaded by the game</h3>
+<ul>
+  <li><strong>jsDelivr</strong> (cdn.jsdelivr.net): serves the three.js and PeerJS libraries.</li>
+  <li><strong>Google Fonts</strong> (fonts.googleapis.com, fonts.gstatic.com): serves the fonts.</li>
+  <li><strong>This website's host</strong> (for example, GitHub Pages) serves the game files.</li>
+</ul>
+<p>These services receive your IP address and the normal technical data of any web request (browser, system), under their own privacy policies. After the first visit, the game keeps these libraries on your device so you can play offline.</p>
+<p>If you install the game from Google Play or the Microsoft Store, the store and the system browser (for example, Chrome or Edge) process data under their own policies; the game sends them no additional data.</p>
+
+<h3>5. What the game does NOT do</h3>
+<ul>
+  <li>It does not ask for accounts, email, phone number, location, contacts, camera or microphone.</li>
+  <li>It shows no ads and uses no advertising identifiers.</li>
+  <li>It has no purchases and no real money. The Star Pass is free.</li>
+  <li>It uses no analytics, tracking cookies or profiling.</li>
+</ul>
+
+<h3>6. Children</h3>
+<p>The game does not ask for or collect personal data from anyone, including children. We recommend that children play online with family supervision and without personal details in their nickname.</p>
+
+<h3>7. Your rights</h3>
+<p>Since the owner stores no data about you, there is nothing to access, correct or delete in the owner's systems. You control your local data (section 2). For any question, write to <strong>[CORREO DE CONTACTO]</strong>.</p>
+
+<h3>8. Changes</h3>
+<p>If this policy changes, the new version will be published here with a new date.</p>
+</section>
+</main>
+</body>
+</html>
