@@ -8642,6 +8642,9 @@ const EXCEPTIONS = new Set(['analia', 'cassandra', 'massimo', 'scunthorpe', 'shi
   'passion', 'pass', 'grass', 'glass', 'dickens', 'hello', 'shell', 'michelle', 'pendejito', 'putin', 'computadora', 'computador', 'computo', 'imputado', 'diputado', 'diputada', 'disputa',
   'reputacion', 'sexto', 'sexta', 'pique', 'picante', 'paulo', 'pauline', 'cocoa', 'coco', 'kill', 'morena', 'moreno', 'morado', 'morada']);
 
+// Reservados: el nombre del creador (XXsympaXX: xxsympaxx, xsympax, x_sympa_x, symp4, sympa…) y los rótulos de la insignia.
+const RESERVED = ['sympa', 'creador', 'creator', 'creadora'];
+
 function normalize(s, keepRepeats) {
   let t = String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
   t = t.replace(/[0134578@$!|]/g, (c) => ({ 0: 'o', 1: 'i', 3: 'e', 4: 'a', 5: 's', 7: 't', 8: 'b', '@': 'a', $: 's', '!': 'i', '|': 'i' }[c]));
@@ -8687,20 +8690,29 @@ function nameOk(str) {
     for (const w of LONG) if (seg.includes(w)) return false;
   }
   if (SHORT.has(whole)) return false;
+  // nombre reservado del creador (solo se muestra con su firma verificada, ver creator.js) y variantes
+  if ([whole, vu, raw, whole.replace(/[ck]/g, 's')].some((x) => RESERVED.some((r) => x.includes(r)))) return false;
+  if (/xs[iy]mpa|s[iy]mpax/.test(whole.replace(/[ck]/g, 's'))) return false;   // XXsimpaXX, xsimpa…
   return true;
 }
 
+const CREATOR_DISPLAY = 'XXsympaXX';   // = CREATOR_NAME de creator.js (names.js no importa nada)
+
 function createNames(opts = {}) {
   const getSetting = opts.safeNames || (() => 'private');
+  // creador verificado (firma ECDSA comprobada por creator.js): por encima de todo el sistema de nombres
+  const isCreator = (peer) => { try { return !!(opts.isCreator && opts.isCreator(peer)); } catch (e) { return false; } };
   const api = {
     ok: nameOk,
     normalize,
-    forPeer: (peer) => generatedName('peer:' + String(peer == null ? '?' : peer)),
+    forPeer: (peer) => (isCreator(peer) ? CREATOR_DISPLAY : generatedName('peer:' + String(peer == null ? '?' : peer))),
+    isCreator,
     // propuesta aleatoria para quien crea su nombre (no se guarda nada de nadie)
     // (formato corto que cumple el filtro: criatura + 2 dígitos, ≤ 12 caracteres)
     suggest: () => { const h = hash32('sug:' + Math.random() + ':' + Date.now()); let n = (h >>> 10) % 100; if (n === 69 || n === 66 || n === 88 || n === 13) n++; return `${NOUNS[h % 32]} ${String(n).padStart(2, '0')}`; },
     // nombre ajeno a mostrar según el contexto (§3.6): 'private' (sala por código) | 'ranked' (siempre generado)
     display(peer, chosen, context) {
+      if (isCreator(peer)) return CREATOR_DISPLAY;
       if (context === 'ranked' || context === 'match' || getSetting() === 'always') return api.forPeer(peer);
       const c = String(chosen == null ? '' : chosen).trim();
       return c && nameOk(c) ? c : api.forPeer(peer);
@@ -8711,6 +8723,185 @@ function createNames(opts = {}) {
 }
 
 return { hash32, generatedName, nameOk, createNames };
+})();
+
+// ===== creator.js =====
+const __m_creator = (() => {
+// CHOQUE ESTELAR — creator.js · identidad VERIFICABLE del creador del juego (XXsympaXX), sin servidor.
+// La clave PÚBLICA (ECDSA P-256) va incrustada aquí. La PRIVADA solo la tiene el creador (archivo JWK
+// que carga desde PERFIL → «Soy el creador»). Online, el creador publica en su presence `cr` = firma de
+// "CE1|<peer>|<ts>" con ts reciente; los demás la verifican con la pública y SOLO entonces muestran
+// «XXsympaXX» con la insignia CREADOR. Sin prueba válida → sistema normal de nombres (names.js reserva el nombre).
+// Sin dependencias: WebCrypto (crypto.subtle). Sin contexto seguro (http) la función queda desactivada.
+
+const CREATOR_NAME = 'XXsympaXX';
+const CREATOR_PUBLIC_JWK = Object.freeze({ kty: 'EC', crv: 'P-256', x: 'NpZ1TtFj28UkP_C4-NnNX2qBTv6idNur78tZdGK2goY', y: 'Uwpw0RnD9g83Niw0qwrTrYxX9DftMnNuohweFMZSYAA' });
+const CREATOR_MAX_AGE = 120000;   // ms: una prueba más vieja (o del futuro) que esto se rechaza
+const REFRESH_MS = 50000;                // el creador renueva su prueba cada 50 s
+const ALG = { name: 'ECDSA', namedCurve: 'P-256' };
+const SIG = { name: 'ECDSA', hash: 'SHA-256' };
+const LS_KEY = 'choque-creator-v1';
+const IDB = { db: 'choque-creator', store: 'k', key: 'key' };
+const CR_RE = /^[0-9a-z]{6,10}\.[A-Za-z0-9_-]{86}$/;
+
+const subtle = () => (globalThis.crypto && globalThis.crypto.subtle) || null;
+const b64u = (buf) => { let s = ''; const a = new Uint8Array(buf); for (let i = 0; i < a.length; i++) s += String.fromCharCode(a[i]); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
+const unb64u = (str) => { const s = atob(str.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((str.length + 3) % 4)); const a = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i); return a; };
+const msgOf = (peer, ts) => new TextEncoder().encode('CE1|' + peer + '|' + ts);
+
+// Formato de la prueba en la presence: "<ts en base 36>.<firma P1363 de 64 bytes en base64url>" (≈ 95 B).
+function parseProof(cr) {
+  if (typeof cr !== 'string' || cr.length > 100 || !CR_RE.test(cr)) return null;
+  const [t, s] = cr.split('.');
+  const ts = parseInt(t, 36);
+  if (!Number.isSafeInteger(ts) || ts <= 0) return null;
+  let sig; try { sig = unb64u(s); } catch (e) { return null; }
+  return sig.length === 64 ? { ts, sig } : null;
+}
+
+function idbOpen() {
+  return new Promise((res, rej) => {
+    const idb = globalThis.indexedDB;
+    if (!idb) { rej(new Error('sin IndexedDB')); return; }
+    const rq = idb.open(IDB.db, 1);
+    rq.onupgradeneeded = () => { try { rq.result.createObjectStore(IDB.store); } catch (e) { /* */ } };
+    rq.onsuccess = () => res(rq.result);
+    rq.onerror = () => rej(rq.error || new Error('idb'));
+  });
+}
+async function idbDo(mode, fn) {
+  const db = await idbOpen();
+  try {
+    return await new Promise((res, rej) => {
+      const tx = db.transaction(IDB.store, mode); const st = tx.objectStore(IDB.store);
+      const rq = fn(st);
+      tx.oncomplete = () => res(rq && rq.result); tx.onerror = () => rej(tx.error || new Error('idb')); tx.onabort = () => rej(tx.error || new Error('idb'));
+    });
+  } finally { try { db.close(); } catch (e) { /* */ } }
+}
+
+function createCreator(opts = {}) {
+  const PUB = opts.publicJwk || CREATOR_PUBLIC_JWK;
+  const persist = opts.persist !== false;
+  const now = () => Math.floor((opts.now || Date.now)());
+  const listeners = new Set();
+  let pubKey = null;                 // CryptoKey pública (promesa cacheada)
+  let privKey = null;                // CryptoKey privada (no extraíble) cuando el modo creador está activo
+  const proofs = new Map();          // mi peer -> { ts, cr, pending }
+  const seen = new Map();            // peer ajeno -> { cr, ok, pending }   (resultado cacheado por peer)
+  const verified = new Set();        // peers ajenos con prueba válida (para toda la sesión de ese peer)
+  const changed = (what) => { for (const fn of [...listeners]) { try { fn(what); } catch (e) { /* */ } } if (opts.events) try { opts.events.emit('creatorChange', { what }); } catch (e) { /* */ } };
+
+  function getPub() {
+    if (!pubKey) { const s = subtle(); pubKey = s ? s.importKey('jwk', { kty: 'EC', crv: 'P-256', x: PUB.x, y: PUB.y, ext: true }, ALG, false, ['verify']) : Promise.reject(new Error('sin WebCrypto')); pubKey.catch(() => {}); }
+    return pubKey;
+  }
+
+  // Acepta texto (JSON) u objeto. Comprueba que es la llave de la pública incrustada firmando y verificando un reto.
+  async function load(input) {
+    const s = subtle();
+    if (!s) return { ok: false, error: 'Este navegador no permite criptografía aquí (hace falta https).' };
+    let jwk = input;
+    if (typeof input === 'string') { try { jwk = JSON.parse(input.trim()); } catch (e) { return { ok: false, error: 'El archivo no es una llave válida (JSON).' }; } }
+    if (!jwk || typeof jwk !== 'object' || jwk.kty !== 'EC' || jwk.crv !== 'P-256' || typeof jwk.d !== 'string' || typeof jwk.x !== 'string' || typeof jwk.y !== 'string') return { ok: false, error: 'El archivo no es una llave de creador.' };
+    if (jwk.x !== PUB.x || jwk.y !== PUB.y) return { ok: false, error: 'Esta llave no es la del creador de este juego.' };
+    let key;
+    try { key = await s.importKey('jwk', { kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y, d: jwk.d, ext: false }, ALG, false, ['sign']); }
+    catch (e) { return { ok: false, error: 'La llave está dañada.' }; }
+    try {
+      const ch = new Uint8Array(32); globalThis.crypto.getRandomValues(ch);
+      const sig = await s.sign(SIG, key, ch);
+      if (!(await s.verify(SIG, await getPub(), sig, ch))) return { ok: false, error: 'La llave no corresponde a la del creador.' };
+    } catch (e) { return { ok: false, error: 'No se pudo comprobar la llave.' }; }
+    privKey = key; proofs.clear();
+    if (persist) await save(key, jwk);
+    changed('active');
+    return { ok: true };
+  }
+  async function save(key, jwk) {
+    try { await idbDo('readwrite', (st) => st.put(key, IDB.key)); try { localStorage.removeItem(LS_KEY); } catch (e) { /* */ } return; } catch (e) { /* sin IndexedDB → JWK */ }
+    try { localStorage.setItem(LS_KEY, JSON.stringify({ kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y, d: jwk.d })); } catch (e) { /* */ }
+  }
+  async function restore() {
+    if (!persist || !subtle()) return false;
+    let key = null;
+    try { const k = await idbDo('readonly', (st) => st.get(IDB.key)); if (k && typeof k === 'object' && k.type === 'private') key = k; } catch (e) { /* */ }
+    if (!key) {
+      let jwk = null; try { jwk = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (e) { /* */ }
+      if (jwk && jwk.x === PUB.x && jwk.y === PUB.y) { try { key = await subtle().importKey('jwk', Object.assign({}, jwk, { ext: false }), ALG, false, ['sign']); } catch (e) { key = null; } }
+    }
+    if (!key || privKey) return !!privKey;
+    privKey = key; proofs.clear(); changed('active');
+    return true;
+  }
+  async function disable() {
+    privKey = null; proofs.clear();
+    if (persist) {
+      try { await idbDo('readwrite', (st) => st.delete(IDB.key)); } catch (e) { /* */ }
+      try { localStorage.removeItem(LS_KEY); } catch (e) { /* */ }
+    }
+    changed('inactive');
+  }
+
+  async function sign(peer, ts) {
+    const sig = await subtle().sign(SIG, privKey, msgOf(peer, ts));
+    return ts.toString(36) + '.' + b64u(sig);
+  }
+  // Prueba para MI peer en una sala (síncrono: devuelve la última y renueva en segundo plano).
+  function proofFor(peer) {
+    if (!privKey || typeof peer !== 'string' || !peer) return null;
+    let e = proofs.get(peer);
+    const t = now();
+    if (!e) { e = { ts: 0, cr: null, pending: false }; proofs.set(peer, e); if (proofs.size > 16) proofs.delete(proofs.keys().next().value); }
+    if (!e.pending && t - e.ts > REFRESH_MS) {
+      e.pending = true;
+      const key = privKey;
+      sign(peer, t).then((cr) => { if (privKey !== key) return; e.ts = t; e.cr = cr; e.pending = false; changed('proof'); }, () => { e.pending = false; });
+    }
+    return e.cr && t - e.ts < CREATOR_MAX_AGE - 10000 ? e.cr : null;
+  }
+
+  // Verificación de la prueba de OTRO peer. Síncrono: devuelve si ya está verificado; si llega una prueba
+  // nueva, la verifica en segundo plano y avisa con 'verified'. Se cachea por peer.
+  function check(peer, cr) {
+    if (typeof peer !== 'string' || !peer) return false;
+    if (verified.has(peer)) return true;
+    if (cr == null) return false;
+    const prev = seen.get(peer);
+    if (prev && prev.cr === cr) return false;          // ya comprobada (falló) o en curso
+    const p = parseProof(cr);
+    const entry = { cr, pending: !!p };
+    seen.set(peer, entry);
+    if (seen.size > 256) seen.delete(seen.keys().next().value);
+    if (!p || !subtle()) return false;
+    if (Math.abs(now() - p.ts) > CREATOR_MAX_AGE) { entry.pending = false; return false; }   // caducada o del futuro
+    getPub().then((k) => subtle().verify(SIG, k, p.sig, msgOf(peer, p.ts))).then((ok) => {
+      entry.pending = false;
+      if (ok && Math.abs(now() - p.ts) <= CREATOR_MAX_AGE) { verified.add(peer); changed('verified'); }
+    }, () => { entry.pending = false; });
+    return false;
+  }
+
+  const api = {
+    name: CREATOR_NAME,
+    get active() { return !!privKey; },
+    get supported() { return !!subtle(); },
+    load, disable, restore, proofFor, check,
+    isVerified: (peer) => typeof peer === 'string' && verified.has(peer),
+    onChange(fn) { listeners.add(fn); return () => listeners.delete(fn); },
+  };
+  api.ready = restore().catch(() => false);
+  return api;
+}
+
+// Una instancia por partida/ctx (la comparten net.js y ui.js).
+function creatorFor(ctx) {
+  if (!ctx) return null;
+  if (!ctx.creator) { try { ctx.creator = createCreator({ events: ctx.events }); } catch (e) { ctx.creator = null; } }
+  return ctx.creator;
+}
+
+return { CREATOR_NAME, CREATOR_PUBLIC_JWK, CREATOR_MAX_AGE, parseProof, createCreator, creatorFor };
 })();
 
 // ===== progression.js =====
@@ -13031,6 +13222,7 @@ const __m_net = (() => {
 // Todo lo que llega de otros peers es NO confiable: se valida tipo y rango.
 
 const { createP2PRoom } = __m_p2p;
+const { creatorFor, CREATOR_NAME } = __m_creator;
 
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // A-Z sin O ni I
 const MAX_PLAYERS = 4;
@@ -13125,6 +13317,7 @@ function fallbackOk(name) {
   if (NAME_OK_EXCEPT.has(n.replace(/ /g, ''))) return true;
   const flat = n.replace(/[^a-z]/g, '');
   if (BAD_LONG.some((w) => flat.includes(w))) return false;
+  if (/sympa|creador|creator/.test(flat) || /xs[iy]mpa|s[iy]mpax/.test(flat.replace(/[ck]/g, 's'))) return false;   // reservado: creador (creator.js)
   const toks = n.split(/[^a-z]+/).filter(Boolean);
   return !toks.some((tk) => BAD_SHORT.includes(tk));
 }
@@ -13213,6 +13406,8 @@ const randomKey = () => Math.random().toString(36).slice(2, 10);
 
 function createNet(ctx) {
   const ev = ctx.events;
+  // Identidad verificable del creador (creator.js): prueba firmada en la presence (`cr`), verificada por peer.
+  const CR = creatorFor(ctx) || { active: false, proofFor: () => null, check: () => false, isVerified: () => false, onChange: () => () => {} };
   let room = null;          // namespace
   let named = null;         // NamedRoom
   let fatal = false;
@@ -13232,6 +13427,10 @@ function createNet(ctx) {
   let lastSent = {};
 
   let Q = null;                     // estado de la cola clasificatoria
+  CR.onChange((what) => {
+    if (what === 'verified') { lastPeersRef = null; ev.emit('lobbyUpdate'); }   // repintar nombres
+    else { markDirty(); if (what !== 'proof') lastPeersRef = null; }
+  });
 
   // Estado derivado
   let lastLobby = null;             // última config de host vista (para migración)
@@ -13454,8 +13653,11 @@ function createNet(ctx) {
       slot: me.slot, m: me.m, f: me.f, hits: me.hitsW || [], hseq: me.hseq, ak: me.ak, lobby: me.role === 'host' ? me.lobby : null,
       cos: net.status === 'in-match' ? null : me.cos, em: me.em,
       fi: me.pf.fi || null, hz: me.pf.hz || null, hs: me.pf.hs ?? null, fr: me.pf.fr || null, fu: me.pf.fu || null,
+      // prueba de creador (≈ 100 B): solo fuera de la partida, como `cos`; los demás la verifican en la sala y la recuerdan por peer
+      cr: net.status === 'in-match' ? null : CR.proofFor(net.myPeer),
     };
     if (!p.cos) delete p.cos;
+    if (!p.cr) delete p.cr;
     // Durante la partida (2 s después de "¡YA!"; el roster completo estuvo publicado toda la cuenta atrás) el anfitrión publica un lobby reducido: el roster completo
     // ya lo tienen todos (se leyó al empezar) y el nuevo anfitrión usa su copia (lastLobby).
     if (p.lobby && p.lobby.phase === 'playing' && Date.now() > (p.lobby.startAt || 0) + 2000) p.lobby = slimLobby(p.lobby);
@@ -13667,10 +13869,11 @@ function createNet(ctx) {
       if (!p.sameTab && pr.v !== PROTO) { if (Number.isInteger(pr.v) && !net.versionMismatch) { net.versionMismatch = true; net.versionWarning = 'Hay un jugador con otra versión del juego: recargad la página.'; } continue; }
       const slot = slotMap.has(p.peer) ? slotMap.get(p.peer) : -1;
       const chosen = str(pr.name, 16);
-      const name = p.sameTab ? (chosen || displayName(p.peer, '', 'private')) : displayName(p.peer, chosen, lobby && lobby.rk ? 'ranked' : 'private');
+      const creator = p.sameTab ? !!CR.active : CR.check(p.peer, pr.cr);
+      const name = creator ? CREATOR_NAME : p.sameTab ? (chosen || displayName(p.peer, '', 'private')) : displayName(p.peer, chosen, lobby && lobby.rk ? 'ranked' : 'private');
       const team = p.sameTab ? me.team.map(([c, k]) => ({ charId: c, colorIndex: k })) : sanitizeTeam(pr.team, SQUAD_MAX);
       players.push({ peer: p.peer, name, cos: p.sameTab ? me.cos : sanitizeCos(pr.cos), charId: idStr(pr.charId) || '', colorIndex: int(pr.colorIndex, 0, MAX_CI, 0), team,
-        ready: pr.ready === true, slot, isMe: !!p.sameTab, isHost: p.peer === net.hostPeer, guest: !!p.guest });
+        ready: pr.ready === true, slot, isMe: !!p.sameTab, isHost: p.peer === net.hostPeer, guest: !!p.guest, creator });
     }
     players.sort((a, b) => (a.slot < 0 ? 9 : a.slot) - (b.slot < 0 ? 9 : b.slot) || (a.peer < b.peer ? -1 : 1));
     const changed = JSON.stringify(players) !== JSON.stringify(net.lobbyPlayers) || prevHost !== net.hostPeer;
@@ -13862,11 +14065,13 @@ function createNet(ctx) {
     return out.length ? out : null;
   }
   function nameFor(peer) {
+    if (CR.isVerified(peer)) return CREATOR_NAME;
     try { if (ctx.names && typeof ctx.names.forPeer === 'function') { const v = ctx.names.forPeer(peer); if (typeof v === 'string' && v) return v.slice(0, 24); } } catch (e) { /* */ }
     return genName(peer);
   }
   // Lo que se muestra de otro jugador: en Clasificatoria siempre el generado; en sala privada el elegido si pasa el filtro EN EL RECEPTOR.
   function displayName(peer, chosen, context) {
+    if (CR.isVerified(peer)) return CREATOR_NAME;
     try { if (ctx.names && typeof ctx.names.display === 'function') { const v = ctx.names.display(peer, chosen, context); if (typeof v === 'string' && v) return v.slice(0, 24); } } catch (e) { /* */ }
     if (context === 'ranked' || !chosen) return genName(peer);
     return fallbackOk(chosen) ? chosen : genName(peer);
@@ -14240,6 +14445,7 @@ function createNet(ctx) {
       if (!p || typeof p.peer !== 'string' || p.kind === 'agent') continue;
       if (p.sameTab) { mine = p.peer; continue; }
       const pr = pres(p);
+      CR.check(p.peer, pr.cr);
       if (pr.q !== 1 || !Number.isInteger(pr.sr) || pr.sr < 0 || pr.sr > MAX_SR) continue;
       const w = isObj(pr.want) ? pr.want : {};
       const lbl = (v) => (typeof v === 'string' && v.length <= 128 ? v : null);
@@ -14250,8 +14456,11 @@ function createNet(ctx) {
         code: typeof pr.code === 'string' && /^[A-Z]{5}$/.test(pr.code) && [...pr.code].every((c) => CODE_CHARS.includes(c)) ? pr.code : null,
       });
     }
+    // mi prueba de creador en esta sala de cola (se renueva sola; solo se reenvía si cambia)
+    if (mine && CR.active) { const cr = CR.proofFor(mine); if (cr && qCrSent.get(r) !== cr) { qCrSent.set(r, cr); qSet(r, { cr }); } }
     return { me: mine, others };
   }
+  const qCrSent = new WeakMap();
   function compatible(o) {
     const rg = qRange();
     return o.sr >= rg.min && o.sr <= rg.max && Q.me.sr >= o.want.min && Q.me.sr <= o.want.max;
@@ -14569,6 +14778,8 @@ function createNet(ctx) {
       processAcks(all);
       processEmotes(all);
     }
+    // creador: mantener viva la prueba (proofFor la renueva en segundo plano y avisa con 'proof' → markDirty)
+    if (CR.active && net.myPeer && net.status !== 'in-match') { const cr = CR.proofFor(net.myPeer); if (cr && lastSent.cr !== cr) markDirty(); }
     sendTimer += (typeof dt === 'number' && dt > 0 ? dt : 0.016);
     if (sendTimer >= SEND_INTERVAL) { sendTimer = 0; flush(false); }
   }
@@ -16780,6 +16991,7 @@ const { badgeCanvas, ANIMATED_TIERS, tierColor } = __m_badges;
 const RankMod = __m_rank;
 const { createProgression, CATALOG, PHRASES, RANKED_PHRASES, catName, rewardSource, missionDef, xpToNext } = __m_progression;
 const { createNames } = __m_names;
+const { creatorFor, CREATOR_NAME } = __m_creator;
 const { drawIcon, drawCardBg } = __m_badges;
 const TrainMod = __m_training;
 
@@ -16825,6 +17037,10 @@ const CSS = `
 #ui .head h2{font-size:clamp(22px,3.6vw,46px);transform:skewX(-8deg);background:linear-gradient(90deg,#fff,var(--cy));-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(3px 3px 0 var(--mg))}
 #ui .head .tag{font:700 12px var(--body);letter-spacing:.3em;color:var(--mut);padding:4px 10px;border:1px solid rgba(255,255,255,.2);transform:skewX(-12deg)}
 #ui .hint{position:absolute;bottom:clamp(8px,2vh,20px);left:0;right:0;text-align:center;font:600 12px var(--body);letter-spacing:.18em;color:var(--mut);pointer-events:none}
+#ui .crb{display:inline-block;vertical-align:middle;margin-left:6px;padding:1px 6px 0;font:400 10px/1.4 var(--disp);letter-spacing:.08em;color:#2a1600;background:linear-gradient(135deg,#fff3b0,#ffc83d 45%,#e09a00);border-radius:3px;box-shadow:0 0 10px rgba(255,200,61,.7);transform:skewX(-8deg);white-space:nowrap;text-shadow:none;-webkit-text-stroke:0}
+#ui .hc .crb.hcb{position:absolute;right:14px;top:-12px;margin:0}
+#ui .koban .crb{font-size:clamp(11px,1.2vw,16px)}
+#ui .crt{display:flex;flex-direction:column;gap:8px;margin-top:8px}#ui .crt textarea{width:100%;min-height:64px;font:12px monospace;background:rgba(0,0,0,.35);color:var(--tx);border:1px solid rgba(255,255,255,.2);border-radius:6px;padding:6px;box-sizing:border-box}#ui .crt input[type=file]{font:12px var(--body);color:var(--mut);max-width:100%}#ui .crt .err{color:#ff6b8a;font:600 12px var(--body)}#ui .crt .okm{color:#ffd45a;font:600 12px var(--body)}
 #ui .hint b{color:var(--tx);border:1px solid rgba(255,255,255,.3);padding:1px 6px;margin:0 3px;border-radius:3px;font-weight:700}
 #ui .btn{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:10px;cursor:pointer;border:0;color:var(--tx);font:400 clamp(16px,2vw,22px) var(--disp);letter-spacing:.04em;padding:14px 34px;background:linear-gradient(90deg,rgba(58,15,110,.9),rgba(29,11,69,.9));clip-path:polygon(14px 0,100% 0,calc(100% - 14px) 100%,0 100%);transition:transform .14s,filter .14s,background .14s;outline:none}
 #ui .btn::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,var(--mg),var(--cy));opacity:0;transition:opacity .14s;z-index:-1}
@@ -17582,7 +17798,7 @@ function createUI(ctx, root) {
     build() {
       const s = mk('div', 'scr title');
       const word = (w, d0) => [...w].map((ch, i) => `<span style="animation-delay:${(d0 + i * 0.06).toFixed(2)}s">${ch}</span>`).join('');
-      s.innerHTML = `<div class="burst"></div><div class="logo"><span class="l1">${word('CHOQUE', 0.1)}</span><span class="l2">${word('ESTELAR', 0.5)}</span><span class="star">✦</span><span class="sub">LUCHA DE PLATAFORMAS · 1-4 JUGADORES</span></div><div class="press">PULSA CUALQUIER TECLA</div><div class="hint">© ${new Date().getFullYear()} · UN JUEGO ORIGINAL</div>`;
+      s.innerHTML = `<div class="burst"></div><div class="logo"><span class="l1">${word('CHOQUE', 0.1)}</span><span class="l2">${word('ESTELAR', 0.5)}</span><span class="star">✦</span><span class="sub">LUCHA DE PLATAFORMAS · 1-4 JUGADORES</span></div><div class="press">PULSA CUALQUIER TECLA</div><div class="hint">© ${new Date().getFullYear()} · UN JUEGO ORIGINAL · CREADO POR XXsympaXX</div>`;
       s.addEventListener('click', () => this.go());
       this.t = 0;
       return s;
@@ -18349,7 +18565,7 @@ function createUI(ctx, root) {
           const c = charById((team[0] && team[0].charId) || p.charId || CH()[0].id);
           const ci = team[0] ? team[0].colorIndex | 0 : p.colorIndex || 0;
           const tr = lm.squad ? `<div class="lt">${teamMinis(team, lm.size, -1, false)}</div>` : '';
-          html += `<div class="lp${lm.squad ? ' sqm' : ''}" style="--pc:${PCOL[i]}">${imgTag(c.id, ci)}<span class="nm">${esc(othersName(p.peer, p.name, p.isMe))}${p.isMe ? ' · TÚ' : ''}</span>${p.isHost ? '<span class="host">★ ANFITRIÓN</span>' : ''}${tr}${p.isMe ? '' : muteBtnHTML('peer:' + p.peer)}<div class="ch"><span>${lm.squad ? 'ESCUADRA ' + team.length + '/' + lm.size : esc(c.name).toUpperCase()}</span>${p.ready || p.isHost ? `<span class="rd">${p.isHost ? 'ANFITRIÓN' : 'LISTO'}</span>` : '<span class="nr">ELIGIENDO…</span>'}</div></div>`;
+          html += `<div class="lp${lm.squad ? ' sqm' : ''}" style="--pc:${PCOL[i]}">${imgTag(c.id, ci)}<span class="nm">${esc(othersName(p.peer, p.name, p.isMe))}${crb(othersName(p.peer, p.name, p.isMe))}${p.isMe ? ' · TÚ' : ''}</span>${p.isHost ? '<span class="host">★ ANFITRIÓN</span>' : ''}${tr}${p.isMe ? '' : muteBtnHTML('peer:' + p.peer)}<div class="ch"><span>${lm.squad ? 'ESCUADRA ' + team.length + '/' + lm.size : esc(c.name).toUpperCase()}</span>${p.ready || p.isHost ? `<span class="rd">${p.isHost ? 'ANFITRIÓN' : 'LISTO'}</span>` : '<span class="nr">ELIGIENDO…</span>'}</div></div>`;
         } else if (cpusLeft > 0) {
           cpusLeft--;
           html += `<div class="lp vacant" style="--pc:${CPUCOL};border-top-color:${CPUCOL}">CPU · NIVEL ${ls.cpuLevel || 5}${lm.squad ? ' · EQUIPO AL AZAR' : ''}</div>`;
@@ -18587,7 +18803,7 @@ function createUI(ctx, root) {
         const el = mk('div', 'hc');
         el.style.setProperty('--pc', pc);
         el.style.setProperty('--cc', f.color != null ? toCss(f.color) : charColor(c, ci));
-        el.innerHTML = `<div class="bgp"></div><div class="por">${imgTag(c.id, ci)}</div><span class="tag">${esc(ri.label)}</span><div class="pct">0<small>%</small></div><div class="lives"></div><div class="sq" hidden></div><div class="mtr" hidden><span class="ml"></span><div class="mb"></div><em class="metro" hidden></em><span class="nodes" hidden></span></div><div class="sts" hidden></div><div class="nm">${esc((ri.name || c.name || '').toUpperCase())}</div>`;
+        el.innerHTML = `<div class="bgp"></div><div class="por">${imgTag(c.id, ci)}</div><span class="tag">${esc(ri.label)}</span><div class="pct">0<small>%</small></div><div class="lives"></div><div class="sq" hidden></div><div class="mtr" hidden><span class="ml"></span><div class="mb"></div><em class="metro" hidden></em><span class="nodes" hidden></span></div><div class="sts" hidden></div><div class="nm">${esc((ri.name || c.name || '').toUpperCase())}</div>${ri.name === CREATOR_NAME ? crb(CREATOR_NAME, 'hcb') : ''}`;
         const gr = g0.ranked || (ranked.inMatch ? {} : null);
         if (gr && g0.mode === 'online') {
           // insignia de rango junto al nombre en clasificatoria
@@ -18724,7 +18940,7 @@ function createUI(ctx, root) {
       o.appendChild(button('ABANDONAR', () => { this.closeOvl(); call(ctx.game, 'quitToMenu'); }));
       try {
         const pl = (ctx.net && Array.isArray(ctx.net.roster) ? ctx.net.roster : []).filter((r) => !r.cpu && r.peer !== ctx.net.myPeer);
-        if (pl.length) o.insertAdjacentHTML('beforeend', `<div class="mutes">${pl.map((r) => `<div class="mrow2"><span>${esc(othersName(r.peer, r.name, false))}</span>${muteBtnHTML('peer:' + r.peer)}</div>`).join('')}</div>`);
+        if (pl.length) o.insertAdjacentHTML('beforeend', `<div class="mutes">${pl.map((r) => `<div class="mrow2"><span>${esc(othersName(r.peer, r.name, false))}${crb(othersName(r.peer, r.name, false))}</span>${muteBtnHTML('peer:' + r.peer)}</div>`).join('')}</div>`);
       } catch (e) { /* */ }
       o.kind = 'online';
       this.ovl = o; scrEl.appendChild(o); setNavRoot(o);
@@ -18749,7 +18965,7 @@ function createUI(ctx, root) {
     const slot = d && d.slot != null ? d.slot : f ? f.slot : 0;
     const ri = f ? rosterInfo(f) : { cpu: false, label: 'P' + (slot + 1) };
     koban.style.setProperty('--pc', ri.cpu ? '#8a7fc0' : PCOL[slot % 4]);
-    koban.innerHTML = `<b>¡FUERA!</b><small>${esc(ri.label)}</small>`;
+    koban.innerHTML = `<b>¡FUERA!</b><small>${esc(ri.name === CREATOR_NAME ? CREATOR_NAME : ri.label)}${crb(ri.name)}</small>`;
     koban.classList.remove('show'); void koban.offsetWidth; koban.classList.add('show');
     clearTimeout(koTimer);
     koTimer = setTimeout(() => koban.classList.remove('show'), 1150);
@@ -18801,7 +19017,7 @@ function createUI(ctx, root) {
       const w = res[0];
       const wi = w ? info(w) : null;
       const wc = w ? charById(w.charId) : null;
-      s.insertAdjacentHTML('beforeend', `<div class="winner">${w ? `¡GANA ${esc(wi.label === 'CPU' ? wc.name : wi.label)}!` : 'FIN DEL COMBATE'}</div>`);
+      s.insertAdjacentHTML('beforeend', `<div class="winner">${w ? `¡GANA ${esc(wi.label === 'CPU' ? wc.name : wi.label)}!${crb(wi.label)}` : 'FIN DEL COMBATE'}</div>`);
       const pod = mk('div', 'podium');
       res.slice(0, 4).forEach((r) => {
         const i = info(r);
@@ -18811,7 +19027,7 @@ function createUI(ctx, root) {
         const sqd = getSquad(r.slot);
         const team = Array.isArray(r.team) && r.team.length ? r.team : sqd ? sqd.team.map((m, k) => Object.assign({}, m, { out: sqd.out && sqd.out[k] })) : null;
         const tr = team ? `<div class="team2">${team.map((m) => `<i class="${m.out ? 'dead' : ''}" title="${esc(charById(m.charId).name)}">${imgTag(m.charId, m.colorIndex | 0)}${m.kos != null ? `<em>${m.kos | 0}</em>` : ''}</i>`).join('')}</div>` : '';
-        pod.insertAdjacentHTML('beforeend', `<div class="pod p${pl}" style="--pc:${pc}"><div class="img">${imgTag(c.id, i.ci)}</div>${tr}<div class="blk"><div class="plc">${pl}º</div><div class="who">${esc(i.label)}</div><div class="cn">${esc((c.name || '').toUpperCase())}</div><div class="stats"><span><b>${r.kos | 0}</b>KOs</span><span><b>${r.falls | 0}</b>CAÍDAS</span><span><b>${Math.round(r.damageDealt || 0)}</b>DAÑO</span></div></div></div>`);
+        pod.insertAdjacentHTML('beforeend', `<div class="pod p${pl}" style="--pc:${pc}"><div class="img">${imgTag(c.id, i.ci)}</div>${tr}<div class="blk"><div class="plc">${pl}º</div><div class="who">${esc(i.label)}${crb(i.label)}</div><div class="cn">${esc((c.name || '').toUpperCase())}</div><div class="stats"><span><b>${r.kos | 0}</b>KOs</span><span><b>${r.falls | 0}</b>CAÍDAS</span><span><b>${Math.round(r.damageDealt || 0)}</b>DAÑO</span></div></div></div>`);
       });
       s.appendChild(pod);
       const bt = mk('div', 'resbtns');
@@ -18952,7 +19168,7 @@ function createUI(ctx, root) {
       const H = Array.isArray(p.history) ? p.history.slice(0, 10) : [];
       if (!H.length) hist.insertAdjacentHTML('beforeend', '<p class="empty">Aún no has jugado ninguna clasificatoria.</p>');
       for (const h of H) {
-        const row = mk('div', 'hrow ' + (h.win ? 'w' : 'l'), `<span class="r">${h.win ? 'V' : 'D'}</span><span class="ob"></span><span class="on">${esc(h.oppName || 'Rival')}${h.abandon ? ' <em>ABANDONO</em>' : ''}</span><span class="os">${h.opp | 0}</span><span class="d">${h.delta > 0 ? '+' : ''}${h.delta | 0}</span>`);
+        const row = mk('div', 'hrow ' + (h.win ? 'w' : 'l'), `<span class="r">${h.win ? 'V' : 'D'}</span><span class="ob"></span><span class="on">${esc(h.oppName || 'Rival')}${crb(h.oppName)}${h.abandon ? ' <em>ABANDONO</em>' : ''}</span><span class="os">${h.opp | 0}</span><span class="d">${h.delta > 0 ? '+' : ''}${h.delta | 0}</span>`);
         row.querySelector('.ob').appendChild(badge(h.opp | 0, 22));
         hist.appendChild(row);
       }
@@ -19101,9 +19317,9 @@ function createUI(ctx, root) {
     rsfx('rankFound');
     const me = charById(ranked.pick.charId), op = charById(ranked.found.oppCharId);
     vsEl.innerHTML = `<div class="vs-title">¡RIVAL ENCONTRADO!</div><div class="vs-row">
-      <div class="vs-side l" style="--pc:${PCOL[0]}"><div class="por">${imgTag(me.id, ranked.pick.colorIndex)}</div><div class="bd"></div><div class="nm">${esc(playerName || 'TÚ')}</div><div class="sr">${esc(tierLabel(ranked.mySr))} · ${ranked.mySr} PE</div></div>
+      <div class="vs-side l" style="--pc:${PCOL[0]}"><div class="por">${imgTag(me.id, ranked.pick.colorIndex)}</div><div class="bd"></div><div class="nm">${esc(CRE.active ? CREATOR_NAME : playerName || 'TÚ')}${CRE.active ? crb(CREATOR_NAME) : ''}</div><div class="sr">${esc(tierLabel(ranked.mySr))} · ${ranked.mySr} PE</div></div>
       <div class="vs-x">VS</div>
-      <div class="vs-side r" style="--pc:${PCOL[1]}"><div class="por">${imgTag(op.id, ranked.found.oppColorIndex)}</div><div class="bd"></div><div class="nm">${esc(ranked.found.oppName)}</div><div class="sr">${esc(tierLabel(oppSr))} · ${oppSr} PE</div></div></div>`;
+      <div class="vs-side r" style="--pc:${PCOL[1]}"><div class="por">${imgTag(op.id, ranked.found.oppColorIndex)}</div><div class="bd"></div><div class="nm">${esc(ranked.found.oppName)}${crb(ranked.found.oppName)}</div><div class="sr">${esc(tierLabel(oppSr))} · ${oppSr} PE</div></div></div>`;
     vsEl.querySelector('.l .bd').appendChild(badge(ranked.mySr, 110, { glow: true }));
     vsEl.querySelector('.r .bd').appendChild(badge(oppSr, 110, { glow: true }));
     vsEl.hidden = false;
@@ -19152,7 +19368,7 @@ function createUI(ctx, root) {
     build() {
       const r = ranked.result || { won: false, before: ranked.mySr, after: ranked.mySr, delta: 0 };
       const s = mk('div', 'scr rkr' + (r.won ? ' win' : ' loss'));
-      s.innerHTML = `<div class="rkr-head">${r.won ? '¡VICTORIA!' : 'DERROTA'}</div><div class="rkr-vs">contra ${esc(r.oppName || 'Rival')}${r.abandon ? (r.won ? ' · EL RIVAL ABANDONÓ' : ' · ABANDONO') : ''}</div>`;
+      s.innerHTML = `<div class="rkr-head">${r.won ? '¡VICTORIA!' : 'DERROTA'}</div><div class="rkr-vs">contra ${esc(r.oppName || 'Rival')}${crb(r.oppName)}${r.abandon ? (r.won ? ' · EL RIVAL ABANDONÓ' : ' · ABANDONO') : ''}</div>`;
       this.bwrap = mk('div', 'rkr-badge');
       this.bwrap.appendChild(badge(r.before, 200, { glow: true }));
       s.appendChild(this.bwrap);
@@ -19228,14 +19444,41 @@ function createUI(ctx, root) {
   // =====================================================================
   const PROG = ctx.progression || (ctx.progression = (() => { try { return createProgression(ctx); } catch (e) { console.error('[progression]', e); return null; } })());
   try { if (PROG) PROG.setCharacters(CH()); } catch (e) { /* */ }
-  if (!ctx.names) { try { ctx.names = createNames({ safeNames: () => (PROG && PROG.settings && PROG.settings.safeNames) || 'private' }); } catch (e) { ctx.names = null; } }
+  const CRE = creatorFor(ctx) || { active: false, supported: false, isVerified: () => false, load: async () => ({ ok: false, error: 'No disponible' }), disable: async () => {}, onChange: () => () => {} };
+  if (!ctx.names) { try { ctx.names = createNames({ safeNames: () => (PROG && PROG.settings && PROG.settings.safeNames) || 'private', isCreator: (p) => CRE.isVerified(p) }); } catch (e) { ctx.names = null; } }
   const NAMES = ctx.names || { ok: () => true, forPeer: (p) => 'Jugador ' + String(p || '').slice(-2), display: (p, n) => n || 'Jugador', suggest: () => 'Jugador' };
   // Bloque B: import estático (el empaquetado concatena módulos); creación defensiva: si falla, el juego carga igual.
   if (!ctx.training) { try { ctx.training = TrainMod && typeof TrainMod.createTraining === 'function' ? TrainMod.createTraining(ctx) : null; } catch (e) { console.warn('[ui] training.js no disponible', e); ctx.training = null; } }
   function loadTraining() { return Promise.resolve(ctx.training || null); }
   const pcall = (m, ...a) => call(PROG, m, ...a);
   // En Clasificatoria (1v1) el rival siempre se llama como en la pantalla de emparejamiento y el historial (un solo origen: game.ranked.oppName)
-  const othersName = (peer, chosen, isMe) => (isMe ? (chosen || playerName || 'Jugador') : ctx.game && ctx.game.ranked ? (ctx.game.ranked.oppName || NAMES.forPeer(peer)) : NAMES.display(peer, chosen, 'private'));
+  // Insignia dorada de CREADOR. Solo sale para el nombre exacto, que nadie puede tener sin la firma verificada
+  // (names.js lo reserva y los nombres generados nunca coinciden).
+  function crb(name, cls) { return name === CREATOR_NAME ? `<span class="crb${cls ? ' ' + cls : ''}" title="Creador del juego (identidad verificada)">★ CREADOR</span>` : ''; }
+  // PERFIL → OPCIONES: «Soy el creador · cargar llave» (discreto). Importa la JWK, la comprueba con la pública incrustada y la guarda.
+  let crOpen = false, crMsg = '';
+  function creatorPanel(rerender) {
+    const box = mk('div', 'crt');
+    if (CRE.active) {
+      box.insertAdjacentHTML('beforeend', `<p class="okm">Modo creador ACTIVO: online eres ${esc(CREATOR_NAME)}${crb(CREATOR_NAME)}</p>`);
+      box.appendChild(button('Desactivar modo creador', () => { crMsg = ''; crOpen = false; CRE.disable().then(rerender, rerender); }, 'small'));
+      return box;
+    }
+    if (!crOpen) { const b = button('Soy el creador · cargar llave', () => { crOpen = true; crMsg = ''; rerender(); }, 'small'); b.style.opacity = '.55'; box.appendChild(b); return box; }
+    if (!CRE.supported) { box.insertAdjacentHTML('beforeend', '<p class="err">Este navegador no permite comprobar la llave aquí (hace falta https).</p>'); return box; }
+    box.insertAdjacentHTML('beforeend', '<p class="pnote">Elige el archivo de tu llave de creador (.json) o pega su texto. La llave se queda solo en este dispositivo.</p>');
+    const fi = document.createElement('input'); fi.type = 'file'; fi.accept = '.json,application/json'; box.appendChild(fi);
+    const ta = document.createElement('textarea'); ta.placeholder = 'o pega aquí el texto de la llave'; ta.spellcheck = false; ta.autocomplete = 'off'; box.appendChild(ta);
+    const msg = mk('p', 'err', esc(crMsg)); box.appendChild(msg);
+    const tryLoad = (text) => CRE.load(text).then((r) => { ta.value = ''; if (r && r.ok) { crMsg = ''; crOpen = false; toast('Modo creador activado'); } else crMsg = (r && r.error) || 'Llave no válida.'; rerender(); });
+    fi.addEventListener('change', () => { const f = fi.files && fi.files[0]; if (!f) return; if (f.size > 4096) { crMsg = 'Ese archivo no es una llave.'; rerender(); return; } f.text().then(tryLoad, () => { crMsg = 'No se pudo leer el archivo.'; rerender(); }); });
+    box.appendChild(button('CARGAR LLAVE PEGADA', () => { if (ta.value.trim()) tryLoad(ta.value); }, 'small'));
+    box.appendChild(button('Cancelar', () => { crOpen = false; crMsg = ''; rerender(); }, 'small'));
+    return box;
+  }
+  CRE.onChange((what) => { if (what !== 'proof' && scrName === 'profile' && screens.profile.renderTab && profTab === 'card') { try { screens.profile.renderTab(); } catch (e) { /* */ } } });
+  // Creador (creator.js): yo con la llave cargada, u otro con la firma verificada → «XXsympaXX» por encima de todo lo demás.
+  const othersName = (peer, chosen, isMe) => (isMe ? (CRE.active ? CREATOR_NAME : (chosen || playerName || 'Jugador')) : CRE.isVerified(peer) ? CREATOR_NAME : ctx.game && ctx.game.ranked ? (ctx.game.ranked.oppName || NAMES.forPeer(peer)) : NAMES.display(peer, chosen, 'private'));
   const fmtDate = (ms) => { try { return new Date(ms).toLocaleDateString('es-ES', { day: 'numeric', month: 'long' }); } catch (e) { return new Date(ms).toDateString(); } };
   const fmtLeft = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h + ' h ' + String(m).padStart(2, '0') + ' min'; };
 
@@ -19301,7 +19544,7 @@ function createUI(ctx, root) {
       const inner = mk('div', 'pc-in');
       inner.appendChild(iconCanvas(e.icon, 72));
       const fav = PROG.favoriteChar();
-      inner.insertAdjacentHTML('beforeend', `<div class="pc-txt"><div class="pc-name">${esc(playerName || 'Jugador')}</div><div class="pc-title">${esc(catName('title', e.title))}</div>
+      inner.insertAdjacentHTML('beforeend', `<div class="pc-txt"><div class="pc-name">${esc(CRE.active ? CREATOR_NAME : playerName || 'Jugador')}${CRE.active ? crb(CREATOR_NAME) : ''}</div><div class="pc-title">${esc(catName('title', e.title))}</div>
         <div class="pc-lv">NIVEL <b>${lp.level}</b>${pp.stars ? ` · ★ ${pp.stars}` : ''}</div><div class="rk-bar"><i style="width:${Math.round(lp.frac * 100)}%"></i></div><div class="pc-sub">${lp.into} / ${lp.need} XP</div></div>`);
       card.appendChild(inner);
       wrap.appendChild(card);
@@ -19327,6 +19570,7 @@ function createUI(ctx, root) {
       tog('muteAll', 'Silenciar emotes de todos', S.muteAll, () => PROG.setSetting('muteAll', !S.muteAll));
       op.appendChild(button(`Nombres de otros: <b>${S.safeNames === 'always' ? 'SIEMPRE GENERADOS' : 'ELEGIDOS SOLO EN SALAS PRIVADAS'}</b>`, () => { PROG.setSetting('safeNames', S.safeNames === 'always' ? 'private' : 'always'); this.renderTab(); }, 'small'));
       op.insertAdjacentHTML('beforeend', '<p class="pnote">Tu progreso se guarda solo en este dispositivo. No hay tienda ni compras.</p>');
+      op.appendChild(creatorPanel(() => this.renderTab()));
       wrap.appendChild(op);
       this.body.appendChild(wrap);
     },
