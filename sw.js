@@ -1,6 +1,6 @@
 /* Choque Estelar: service worker del sitio (generado por build_web.py; no editar a mano). */
 'use strict';
-const VERSION = 'c79f110238b1';
+const VERSION = '92303d1a473d';
 const PRECACHE = 'choque-estelar-app-' + VERSION;
 const RUNTIME = 'choque-estelar-cdn-v1';   // librerías con versión fija en la URL: se conservan entre versiones
 const PRECACHE_URLS = [
