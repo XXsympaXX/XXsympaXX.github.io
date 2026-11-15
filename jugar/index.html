@@ -180,6 +180,7 @@ function makeIsland(opts) {
     const f = 1 + noise * below * rn3(x * 0.45, y * 0.55, z * 0.45, seed) + noise * 0.5 * below * rn3(x * 1.3, y * 1.6, z * 1.3, seed + 3);
     x *= f; z *= f;
     y += below * noise * depth * 0.08 * rn3(z * 0.7, x * 0.6, y, seed + 7);
+    if (!(Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z))) { x = pos.getX(i); y = pos.getY(i); z = pos.getZ(i); }
     pos.setXYZ(i, x, y, z * (rz / rx));
     const t = THREE.MathUtils.clamp(-y / depth, 0, 1);
     if (t < 0.45) tmp.lerpColors(cTop, cMid, t / 0.45); else tmp.lerpColors(cMid, cBot, (t - 0.45) / 0.55);
@@ -204,7 +205,8 @@ function makeIsland(opts) {
       const x = cp.getX(i), y = cp.getY(i), z = cp.getZ(i);
       let ny = y;
       if (y < -0.1) ny = y - 0.12 * (0.5 + 0.5 * Math.sin(Math.atan2(z, x) * 11 + seed)) * Math.min(1, rx / 6);
-      cp.setXYZ(i, x, ny, z * (rz / rx));
+      if (!Number.isFinite(ny)) ny = Number.isFinite(y) ? y : 0;
+      cp.setXYZ(i, Number.isFinite(x) ? x : 0, ny, Number.isFinite(z) ? z * (rz / rx) : 0);
       const t = THREE.MathUtils.clamp(-ny / 0.4, 0, 1);
       tmp.lerpColors(gT, gL, t);
       if (y > 0) tmp.multiplyScalar(0.92 + 0.12 * (0.5 + 0.5 * rn3(x * 0.8, 0, z * 0.8, seed)));
@@ -8732,6 +8734,9 @@ const __m_creator = (() => {
 // que carga desde PERFIL → «Soy el creador»). Online, el creador publica en su presence `cr` = firma de
 // "CE1|<peer>|<ts>" con ts reciente; los demás la verifican con la pública y SOLO entonces muestran
 // «XXsympaXX» con la insignia CREADOR. Sin prueba válida → sistema normal de nombres (names.js reserva el nombre).
+// Activación alternativa por frase-contraseña: la JWK privada va aquí CIFRADA (AES-GCM 256, clave PBKDF2-SHA-256
+// de la frase normalizada). Ojo: cualquiera puede copiar este bloque y probar frases sin límite fuera del juego;
+// la seguridad depende de que la frase sea larga y aleatoria (el límite de intentos solo frena la interfaz).
 // Sin dependencias: WebCrypto (crypto.subtle). Sin contexto seguro (http) la función queda desactivada.
 
 const CREATOR_NAME = 'XXsympaXX';
@@ -8741,6 +8746,22 @@ const REFRESH_MS = 50000;                // el creador renueva su prueba cada 50
 const ALG = { name: 'ECDSA', namedCurve: 'P-256' };
 const SIG = { name: 'ECDSA', hash: 'SHA-256' };
 const LS_KEY = 'choque-creator-v1';
+const LS_TRIES = 'choque-creator-tries';
+// JWK privada cifrada (solo sal, IV, texto cifrado e iteraciones; la frase NO está en ningún sitio).
+const CREATOR_SEALED = Object.freeze(/*SEALED*/{"iter":600000,"salt":"HRVSJ9MZPOKG3hww5AfT8w==","iv":"PB4X29aJICs7Sl2G","ct":"n0h0fw/iV9g5DjjSboqd5llWOENUD01Mx7+uH3XbdcqVtm+xZlyFqbEGM2eYF6Sm4cxu36K7jIPorC0I7oo/gnCZcvCvoJDhHQKCnqZEpB2rH88zDCuH+oYrM7NhHNCNQRRKEZuMEdlPG6Nnd9TyjhmGsMfQSS3/+hxAAAxV+Xy4zO5KtNxJNjvfkJoxg/b5JFe3KzbA5oyzuMQxJuT6zCV633/z6//lmuEkdi/BS3IbKTm6AmQdMpMg7xurdAZL"}/*/SEALED*/);
+// Misma normalización al cifrar y al descifrar: NFC, sin espacios a los lados, espacios internos simples, minúsculas.
+function normalizePhrase(s) { return String(s == null ? '' : s).normalize('NFC').trim().replace(/\s+/g, ' ').toLowerCase().normalize('NFC'); }
+const unb64 = (str) => { const s = atob(str); const a = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i); return a; };
+// Descifra el bloque con la frase → JWK (objeto) o null si la frase no es correcta.
+async function openSealed(phrase, sealed = CREATOR_SEALED) {
+  const s = subtle();
+  if (!s || !sealed) return null;
+  const base = await s.importKey('raw', new TextEncoder().encode(normalizePhrase(phrase)), 'PBKDF2', false, ['deriveKey']);
+  const key = await s.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt: unb64(sealed.salt), iterations: sealed.iter }, base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+  try { return JSON.parse(new TextDecoder().decode(await s.decrypt({ name: 'AES-GCM', iv: unb64(sealed.iv) }, key, unb64(sealed.ct)))); } catch (e) { return null; }
+}
+// Espera tras fallos: los 4 primeros libres; desde el 5.º, 5 s, 10 s, 20 s… (tope 10 min).
+const lockAfter = (fails) => (fails < 5 ? 0 : Math.min(600000, 5000 * 2 ** (fails - 5)));
 const IDB = { db: 'choque-creator', store: 'k', key: 'key' };
 const CR_RE = /^[0-9a-z]{6,10}\.[A-Za-z0-9_-]{86}$/;
 
@@ -8882,8 +8903,35 @@ function createCreator(opts = {}) {
     return false;
   }
 
+  // ---- activación por frase-contraseña (con límite de intentos, guardado en localStorage)
+  const sealed = opts.sealed !== undefined ? opts.sealed : CREATOR_SEALED;
+  let tries = { fails: 0, until: 0 }, unlocking = false;
+  try { const t = JSON.parse(localStorage.getItem(LS_TRIES) || 'null'); if (t && Number.isInteger(t.fails) && t.fails >= 0) tries = { fails: Math.min(t.fails, 99), until: Number(t.until) || 0 }; } catch (e) { /* */ }
+  const saveTries = () => { try { localStorage.setItem(LS_TRIES, JSON.stringify(tries)); } catch (e) { /* */ } };
+  const waitLeft = () => Math.max(0, tries.until - now());
+  async function unlock(phrase) {
+    if (!subtle() || !sealed) return { ok: false, error: 'Este navegador no permite comprobar la contraseña aquí (hace falta https).' };
+    if (unlocking) return { ok: false, error: 'Ya se está comprobando.' };
+    const w = waitLeft();
+    if (w > 0) return { ok: false, wait: w, error: `Demasiados intentos: espera ${Math.ceil(w / 1000)} s.` };
+    if (!normalizePhrase(phrase)) return { ok: false, error: 'Escribe la contraseña.' };
+    unlocking = true;
+    try {
+      let jwk = null;
+      try { jwk = await openSealed(phrase, sealed); } catch (e) { jwk = null; }
+      const r = jwk ? await load(jwk) : { ok: false };
+      if (r.ok) { tries = { fails: 0, until: 0 }; saveTries(); return { ok: true }; }
+      tries.fails++; const lk = lockAfter(tries.fails); tries.until = lk ? now() + lk : 0; saveTries();
+      return { ok: false, wait: lk, error: 'Contraseña incorrecta.' + (lk ? ` Espera ${Math.ceil(lk / 1000)} s para volver a intentarlo.` : '') };
+    } finally { unlocking = false; }
+  }
+
   const api = {
     name: CREATOR_NAME,
+    unlock, waitLeft,
+    get hasSealed() { return !!sealed; },
+    get unlocking() { return unlocking; },
+    get fails() { return tries.fails; },
     get active() { return !!privKey; },
     get supported() { return !!subtle(); },
     load, disable, restore, proofFor, check,
@@ -8901,7 +8949,7 @@ function creatorFor(ctx) {
   return ctx.creator;
 }
 
-return { CREATOR_NAME, CREATOR_PUBLIC_JWK, CREATOR_MAX_AGE, parseProof, createCreator, creatorFor };
+return { CREATOR_NAME, CREATOR_PUBLIC_JWK, CREATOR_MAX_AGE, CREATOR_SEALED, normalizePhrase, openSealed, lockAfter, parseProof, createCreator, creatorFor };
 })();
 
 // ===== progression.js =====
@@ -10608,7 +10656,8 @@ function createEngine(ctx, container) {
       // Encuadre
       const b = (ctx.game && ctx.game.stage && ctx.game.stage.cameraBounds) || (st && st.cameraBounds) || themeBounds || DEFAULT_BOUNDS;
       const tan = tanHalf();
-      const asp = Math.max(0.3, camera.aspect);
+      // Con la ventana a 0 (pestaña o panel oculto) aspect sería NaN y la cámara no se recuperaría nunca.
+      const asp = Number.isFinite(camera.aspect) && camera.aspect > 0 ? Math.max(0.3, camera.aspect) : 16 / 9;
       let cx, cy, d;
       const haveTargets = targets.length > 0 && (time - targetsTime) < 0.5;
       if (haveTargets) {
@@ -10632,6 +10681,8 @@ function createEngine(ctx, container) {
       cx = b.right - hw < b.left + hw ? (b.left + b.right) * 0.5 : THREE.MathUtils.clamp(cx, b.left + hw, b.right - hw);
       cy = b.top - hh < b.bottom + hh ? (b.top + b.bottom) * 0.5 : THREE.MathUtils.clamp(cy, b.bottom + hh, b.top - hh);
 
+      if (!Number.isFinite(cam.x) || !Number.isFinite(cam.y) || !Number.isFinite(cam.d)) { cam.x = 0; cam.y = 4; cam.d = 40; }
+      if (!Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(d)) { cx = cam.x; cy = cam.y; d = cam.d; }
       const kz = d > cam.d ? 3.4 : 1.7;
       cam.d += (d - cam.d) * (1 - Math.exp(-kz * dt));
       const kp = 4.2;
@@ -10666,6 +10717,7 @@ function createEngine(ctx, container) {
     render() { composer.render(); },
 
     resize(w, h) {
+      if (!(w > 0 && h > 0)) return; // panel/pestaña oculta: se reajusta al volver a ser visible
       renderer.setSize(w, h);
       composer.setSize(w, h);
       setFXAARes(w, h);
@@ -17040,7 +17092,7 @@ const CSS = `
 #ui .crb{display:inline-block;vertical-align:middle;margin-left:6px;padding:1px 6px 0;font:400 10px/1.4 var(--disp);letter-spacing:.08em;color:#2a1600;background:linear-gradient(135deg,#fff3b0,#ffc83d 45%,#e09a00);border-radius:3px;box-shadow:0 0 10px rgba(255,200,61,.7);transform:skewX(-8deg);white-space:nowrap;text-shadow:none;-webkit-text-stroke:0}
 #ui .hc .crb.hcb{position:absolute;right:14px;top:-12px;margin:0}
 #ui .koban .crb{font-size:clamp(11px,1.2vw,16px)}
-#ui .crt{display:flex;flex-direction:column;gap:8px;margin-top:8px}#ui .crt textarea{width:100%;min-height:64px;font:12px monospace;background:rgba(0,0,0,.35);color:var(--tx);border:1px solid rgba(255,255,255,.2);border-radius:6px;padding:6px;box-sizing:border-box}#ui .crt input[type=file]{font:12px var(--body);color:var(--mut);max-width:100%}#ui .crt .err{color:#ff6b8a;font:600 12px var(--body)}#ui .crt .okm{color:#ffd45a;font:600 12px var(--body)}
+#ui .crt{display:flex;flex-direction:column;gap:8px;margin-top:8px}#ui .crt textarea{width:100%;min-height:64px;font:12px monospace;background:rgba(0,0,0,.35);color:var(--tx);border:1px solid rgba(255,255,255,.2);border-radius:6px;padding:6px;box-sizing:border-box}#ui .crt input[type=file]{font:12px var(--body);color:var(--mut);max-width:100%}#ui .crt .err{color:#ff6b8a;font:600 12px var(--body)}#ui .crt .crrow{display:flex;gap:8px;align-items:center}#ui .crt .crrow .btn{flex:0 0 auto}#ui .crt .okm{color:#ffd45a;font:600 12px var(--body)}
 #ui .hint b{color:var(--tx);border:1px solid rgba(255,255,255,.3);padding:1px 6px;margin:0 3px;border-radius:3px;font-weight:700}
 #ui .btn{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:10px;cursor:pointer;border:0;color:var(--tx);font:400 clamp(16px,2vw,22px) var(--disp);letter-spacing:.04em;padding:14px 34px;background:linear-gradient(90deg,rgba(58,15,110,.9),rgba(29,11,69,.9));clip-path:polygon(14px 0,100% 0,calc(100% - 14px) 100%,0 100%);transition:transform .14s,filter .14s,background .14s;outline:none}
 #ui .btn::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,var(--mg),var(--cy));opacity:0;transition:opacity .14s;z-index:-1}
@@ -17693,14 +17745,15 @@ function createUI(ctx, root) {
     if (!navRoot) return [];
     return [...navRoot.querySelectorAll('.nav')].filter((e) => !e.disabled && !e.classList.contains('off') && e.offsetParent !== null);
   }
+  function isTextField(el) { return !!el && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && (el.type === 'text' || el.type === 'password'))); }
   function setFocus(e, silent) {
     if (focusEl === e) return;
     if (focusEl) focusEl.classList.remove('focus');
     focusEl = e;
     if (e) {
       e.classList.add('focus');
-      if (e.tagName === 'INPUT' && e.type === 'text') e.focus({ preventScroll: true });
-      else if (document.activeElement && document.activeElement.tagName === 'INPUT') document.activeElement.blur();
+      if (isTextField(e)) e.focus({ preventScroll: true });
+      else if (document.activeElement && isTextField(document.activeElement)) document.activeElement.blur();
       if (!silent) sfx('move');
     }
   }
@@ -17737,7 +17790,7 @@ function createUI(ctx, root) {
   });
   function navUpdate(m, backFn) {
     if (!m) return;
-    const typing = document.activeElement && document.activeElement.tagName === 'INPUT' && document.activeElement.type === 'text';
+    const typing = isTextField(document.activeElement);
     if (typing && !(m.device && m.device.startsWith('gamepad'))) return;
     if (focusEl && focusEl._step && (m.left || m.right)) { focusEl._step(m.right ? 1 : -1); sfx('move'); return; }
     if (m.up) navMove(0, -1);
@@ -19456,7 +19509,7 @@ function createUI(ctx, root) {
   // (names.js lo reserva y los nombres generados nunca coinciden).
   function crb(name, cls) { return name === CREATOR_NAME ? `<span class="crb${cls ? ' ' + cls : ''}" title="Creador del juego (identidad verificada)">★ CREADOR</span>` : ''; }
   // PERFIL → OPCIONES: «Soy el creador · cargar llave» (discreto). Importa la JWK, la comprueba con la pública incrustada y la guarda.
-  let crOpen = false, crMsg = '';
+  let crOpen = false, crMsg = '';   // crOpen: false | 'pass' (frase-contraseña) | 'file' (archivo de llave)
   function creatorPanel(rerender) {
     const box = mk('div', 'crt');
     if (CRE.active) {
@@ -19464,15 +19517,46 @@ function createUI(ctx, root) {
       box.appendChild(button('Desactivar modo creador', () => { crMsg = ''; crOpen = false; CRE.disable().then(rerender, rerender); }, 'small'));
       return box;
     }
-    if (!crOpen) { const b = button('Soy el creador · cargar llave', () => { crOpen = true; crMsg = ''; rerender(); }, 'small'); b.style.opacity = '.55'; box.appendChild(b); return box; }
-    if (!CRE.supported) { box.insertAdjacentHTML('beforeend', '<p class="err">Este navegador no permite comprobar la llave aquí (hace falta https).</p>'); return box; }
+    if (!crOpen) { const b = button('Soy el creador · escribir contraseña', () => { crOpen = CRE.hasSealed ? 'pass' : 'file'; crMsg = ''; rerender(); }, 'small'); b.style.opacity = '.55'; box.appendChild(b); return box; }
+    if (!CRE.supported) { box.insertAdjacentHTML('beforeend', '<p class="err">Este navegador no permite comprobar la identidad aquí (hace falta https).</p>'); box.appendChild(button('Cancelar', () => { crOpen = false; rerender(); }, 'small')); return box; }
+    const msg = mk('p', 'err', esc(crMsg));
+    if (crOpen === 'pass') {
+      box.insertAdjacentHTML('beforeend', '<p class="pnote">Escribe tu contraseña de creador (da igual mayúsculas o espacios de más). Solo se comprueba en este dispositivo.</p>');
+      const row = mk('div', 'crrow');
+      const pw = mk('input', 'txt nav crpw'); pw.type = 'password'; pw.autocomplete = 'current-password'; pw.spellcheck = false; pw.placeholder = 'Contraseña de creador'; pw.style.width = '100%';
+      row.appendChild(pw);
+      const eye = button('MOSTRAR', () => { const sh = pw.type === 'password'; pw.type = sh ? 'text' : 'password'; eye.innerHTML = sh ? 'OCULTAR' : 'MOSTRAR'; }, 'small');
+      row.appendChild(eye); box.appendChild(row);
+      const go = button('ACTIVAR', () => activate(), 'small go');
+      const lockMsg = () => { const w = CRE.waitLeft(); return w > 0 ? `Demasiados intentos: espera ${Math.ceil(w / 1000)} s.` : ''; };
+      const activate = () => {
+        if (CRE.unlocking) return;
+        const w = CRE.waitLeft();
+        if (w > 0) { msg.className = 'err'; msg.textContent = lockMsg(); return; }
+        if (!pw.value.trim()) { msg.className = 'err'; msg.textContent = 'Escribe la contraseña.'; return; }
+        msg.className = 'okm'; msg.textContent = 'Comprobando…'; go.disabled = true; pw.disabled = true;
+        // dejar pintar «Comprobando…» antes del PBKDF2 (~1 s)
+        setTimeout(() => CRE.unlock(pw.value).then((r) => {
+          pw.value = ''; go.disabled = false; pw.disabled = false;
+          if (r && r.ok) { crMsg = ''; crOpen = false; toast('Modo creador activado'); rerender(); return; }
+          crMsg = (r && r.error) || 'Contraseña incorrecta.'; msg.className = 'err'; msg.textContent = crMsg;
+        }, () => { go.disabled = false; pw.disabled = false; msg.className = 'err'; msg.textContent = 'No se pudo comprobar.'; }), 30);
+      };
+      pw.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); activate(); } if (e.key === 'Escape') pw.blur(); });
+      if (!crMsg) msg.textContent = lockMsg();
+      box.appendChild(go); box.appendChild(msg);
+      box.appendChild(button('¿Tienes el archivo de llave?', () => { crOpen = 'file'; crMsg = ''; rerender(); }, 'small'));
+      box.appendChild(button('Cancelar', () => { crOpen = false; crMsg = ''; rerender(); }, 'small'));
+      return box;
+    }
     box.insertAdjacentHTML('beforeend', '<p class="pnote">Elige el archivo de tu llave de creador (.json) o pega su texto. La llave se queda solo en este dispositivo.</p>');
     const fi = document.createElement('input'); fi.type = 'file'; fi.accept = '.json,application/json'; box.appendChild(fi);
     const ta = document.createElement('textarea'); ta.placeholder = 'o pega aquí el texto de la llave'; ta.spellcheck = false; ta.autocomplete = 'off'; box.appendChild(ta);
-    const msg = mk('p', 'err', esc(crMsg)); box.appendChild(msg);
+    box.appendChild(msg);
     const tryLoad = (text) => CRE.load(text).then((r) => { ta.value = ''; if (r && r.ok) { crMsg = ''; crOpen = false; toast('Modo creador activado'); } else crMsg = (r && r.error) || 'Llave no válida.'; rerender(); });
     fi.addEventListener('change', () => { const f = fi.files && fi.files[0]; if (!f) return; if (f.size > 4096) { crMsg = 'Ese archivo no es una llave.'; rerender(); return; } f.text().then(tryLoad, () => { crMsg = 'No se pudo leer el archivo.'; rerender(); }); });
     box.appendChild(button('CARGAR LLAVE PEGADA', () => { if (ta.value.trim()) tryLoad(ta.value); }, 'small'));
+    if (CRE.hasSealed) box.appendChild(button('Usar contraseña', () => { crOpen = 'pass'; crMsg = ''; rerender(); }, 'small'));
     box.appendChild(button('Cancelar', () => { crOpen = false; crMsg = ''; rerender(); }, 'small'));
     return box;
   }
@@ -20092,7 +20176,16 @@ try {
   ctx.events.emit('roomReady', { available: !!ctx.room });
 })();
 
+function fitView() {
+  if (!(innerWidth > 0 && innerHeight > 0)) return;
+  ctx.camera.aspect = innerWidth / innerHeight;
+  ctx.camera.updateProjectionMatrix();
+  ctx.engine.resize(innerWidth, innerHeight);
+}
+// Si el juego se abrió en una pestaña o panel oculto (tamaño 0), reajusta al hacerse visible.
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') fitView(); });
 addEventListener('resize', () => {
+  if (!(innerWidth > 0 && innerHeight > 0)) return;
   ctx.camera.aspect = innerWidth / innerHeight;
   ctx.camera.updateProjectionMatrix();
   ctx.engine.resize(innerWidth, innerHeight);
@@ -20100,8 +20193,10 @@ addEventListener('resize', () => {
 
 const clock = new THREE.Clock();
 const order = ['game', 'fx', 'engine', 'ui', 'audio'];
+let lastW = innerWidth, lastH = innerHeight;
 function frame() {
   requestAnimationFrame(frame);
+  if ((innerWidth !== lastW || innerHeight !== lastH || !Number.isFinite(ctx.camera.aspect)) && innerWidth > 0 && innerHeight > 0) { lastW = innerWidth; lastH = innerHeight; fitView(); }
   const dt = Math.min(clock.getDelta(), 0.1);
   try { ctx.input.poll(); } catch (e) { console.error('[input.poll]', e); }
   for (const k of order) { try { ctx[k].update(dt); } catch (e) { console.error('[' + k + '.update]', e); } }
